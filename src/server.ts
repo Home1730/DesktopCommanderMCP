@@ -65,6 +65,8 @@ import {
     buildUnsupportedParamsWarning,
 } from './utils/unsupportedParams.js';
 import { getConfig, setConfigValue } from './tools/config.js';
+import { loadHooksConfig, runHooks } from './hooks.js';
+import { configManager } from './config-manager.js';
 import { getUsageStats } from './tools/usage.js';
 import { giveFeedbackToDesktopCommander } from './tools/feedback.js';
 import { trackToolCall } from './utils/trackTools.js';
@@ -1190,9 +1192,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
     return runWithToolCallPaths(() => {
         addToolCallPaths(...pathArguments(args));
         if (isUiOriginCall) {
-            return runInUiOriginCallContext(() => handleCallToolRequest(request));
+            return runInUiOriginCallContext(() => handleCallToolWithHooks(request));
         }
-        return handleCallToolRequest(request);
+        return handleCallToolWithHooks(request);
     });
 });
 
@@ -1202,6 +1204,48 @@ function pathArguments(args: unknown): unknown[] {
     return Object.entries(args)
         .filter(([key]) => /path/i.test(key) || key === 'source' || key === 'destination' || key === 'shell')
         .map(([, value]) => value);
+}
+
+/** Runs user PreToolUse/PostToolUse hooks (~/.claude-server-commander/hooks.json) around a tool call. */
+async function handleCallToolWithHooks(request: CallToolRequest): Promise<ServerResult> {
+    let hooksConfig = null;
+    try {
+        if ((await configManager.getValue('hooksEnabled')) !== false) hooksConfig = loadHooksConfig();
+    } catch {
+        // hooks are best effort; never break the tool call
+    }
+    if (!hooksConfig) return handleCallToolRequest(request);
+
+    const toolName = request.params.name;
+    let toolInput = (request.params.arguments ?? {}) as Record<string, unknown>;
+    const base = { tool_input: toolInput };
+    try {
+        const pre = await runHooks(hooksConfig, 'PreToolUse', toolName, base);
+        if (pre.denyReason !== undefined) {
+            return { content: [{ type: 'text', text: `Blocked by PreToolUse hook: ${pre.denyReason}` }], isError: true };
+        }
+        if (pre.updatedInput) {
+            toolInput = pre.updatedInput;
+            request = { ...request, params: { ...request.params, arguments: toolInput } };
+        }
+    } catch {
+        // fail open
+    }
+
+    const result = await handleCallToolRequest(request);
+
+    try {
+        const post = await runHooks(hooksConfig, 'PostToolUse', toolName, { tool_input: toolInput, tool_response: result });
+        if (post.denyReason !== undefined) {
+            return { content: [{ type: 'text', text: post.denyReason }], isError: true };
+        }
+        if (post.additionalContext.length > 0 && Array.isArray((result as any).content)) {
+            (result as any).content.push({ type: 'text', text: post.additionalContext.join('\n') });
+        }
+    } catch {
+        // fail open
+    }
+    return result;
 }
 
 async function handleCallToolRequest(request: CallToolRequest): Promise<ServerResult> {

@@ -889,6 +889,10 @@ set_config_value({ "key": "fileWriteLineLimit", "value": 25 })
 
 4. **Always verify configuration after changes**: Use `get_config({})` to confirm your changes were applied correctly.
 
+### Hooks
+
+Run your own commands before/after tool calls (block, rewrite, or audit them) via `~/.claude-server-commander/hooks.json`. See [docs/hooks.md](docs/hooks.md).
+
 ## Command Line Options
 
 Desktop Commander supports several command line options for customizing behavior:
